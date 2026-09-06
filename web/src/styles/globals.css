@@ -126,3 +126,14 @@ pre { overflow: auto; max-height: 280px; margin: 0; padding: 12px; border-top: 1
   .audit-form label { grid-column: auto; }
   .dlq-row, .dlq-row > div:last-child { align-items: flex-start; flex-direction: column; }
 }
+
+/* Keep repository actions and update results inside the existing dashboard panels. */
+.audit-form > input { grid-column: 1 / -1; }
+.repository-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 7px; }
+.repository-actions button { flex: 1; }
+.detail-panel { min-width: 0; }
+.dependency-updates p { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.dependency-updates th, .dependency-updates td { padding: 10px; }
+.dependency-updates td { white-space: nowrap; }
+.dependency-updates tbody tr { cursor: default; }
+.dependency-updates .table-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

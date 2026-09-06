@@ -60,8 +60,19 @@ type Detail struct {
 	Events             []Event             `json:"events"`
 	Result             json.RawMessage     `json:"result,omitempty"`
 	ChildCounts        map[Status]int      `json:"childCounts,omitempty"`
+	UpdateResults      []UpdateResult      `json:"updateResults,omitempty"`
 	AuditResults       []AuditResult       `json:"auditResults,omitempty"`
 	AuditRelationships []AuditRelationship `json:"auditRelationships,omitempty"`
+}
+
+// UpdateResult is a stored direct dependency check exposed on its scan root.
+type UpdateResult struct {
+	JobID          string `json:"jobId"`
+	Ecosystem      string `json:"ecosystem"`
+	Name           string `json:"name"`
+	CurrentVersion string `json:"currentVersion"`
+	LatestVersion  string `json:"latestVersion"`
+	Staleness      string `json:"staleness"`
 }
 
 type AuditRelationship struct {

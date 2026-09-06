@@ -202,6 +202,34 @@ func (s *Store) Get(ctx context.Context, id string) (job.Detail, error) {
 		detail.AuditRelationships = append(detail.AuditRelationships, relationship)
 	}
 	rows.Close()
+	if value.Type == "dependency_update_scan" && value.ID == value.RootJobID {
+		rows, err := s.pool.Query(ctx, `SELECT j.id, r.result
+   FROM jobs j JOIN job_results r ON r.job_id = j.id
+   WHERE j.root_job_id = $1 AND j.parent_job_id = $1
+    AND j.type = 'package_update_check' AND j.internal = TRUE
+    AND j.status = 'completed'
+   ORDER BY j.id`, value.ID)
+		if err != nil {
+			return job.Detail{}, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var childID string
+			var data []byte
+			if err := rows.Scan(&childID, &data); err != nil {
+				return job.Detail{}, err
+			}
+			var result job.UpdateResult
+			if err := json.Unmarshal(data, &result); err != nil {
+				return job.Detail{}, fmt.Errorf("decode update result for job %s: %w", childID, err)
+			}
+			result.JobID = childID
+			detail.UpdateResults = append(detail.UpdateResults, result)
+		}
+		if err := rows.Err(); err != nil {
+			return job.Detail{}, err
+		}
+	}
 	return detail, nil
 }
 

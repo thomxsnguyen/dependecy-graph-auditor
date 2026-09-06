@@ -23,7 +23,7 @@ export const JobApi = {
     return request<JobPage>(`/api/jobs?${params}`)
   },
   get(id: string) { return request<JobDetail>(`/api/jobs/${id}`) },
-  submit(type: "demo" | "dependency_audit", payload: unknown, maxAttempts = 5) {
+  submit(type: "demo" | "dependency_audit" | "dependency_update_scan", payload: unknown, maxAttempts = 5) {
     return request<{ job: Job }>("/api/jobs", {
       method: "POST",
       body: JSON.stringify({ type, payload, maxAttempts }),

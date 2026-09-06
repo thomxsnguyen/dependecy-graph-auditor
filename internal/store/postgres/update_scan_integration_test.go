@@ -391,3 +391,79 @@ func TestUpdateScanConcurrentChildCompletion(t *testing.T) {
 	}
 	assertUpdateSummary(t, detail, rootResult.Result)
 }
+
+func TestUpdateResultAggregationIsScopedToScanRoot(t *testing.T) {
+	db := setupIntegrationDB(t)
+	ctx := context.Background()
+	s := storepg.New(db.pool)
+	submit := func(kind, rootID, parentID string, internal bool) job.Job {
+		t.Helper()
+		value, _, err := s.Submit(ctx, job.Submission{Type: kind, RootJobID: rootID, ParentJobID: parentID, Internal: internal, Payload: json.RawMessage(`{}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	root := submit("dependency_update_scan", "", "", false)
+	other := submit("dependency_update_scan", "", "", false)
+	audit := submit("dependency_audit", "", "", false)
+	empty, err := s.Get(ctx, root.ID)
+	if err != nil || len(empty.UpdateResults) != 0 {
+		t.Fatalf("empty=%+v err=%v", empty, err)
+	}
+	completed := submit("package_update_check", root.ID, root.ID, true)
+	pending := submit("package_update_check", root.ID, root.ID, true)
+	failed := submit("package_update_check", root.ID, root.ID, true)
+	otherChild := submit("package_update_check", other.ID, other.ID, true)
+	auditChild := submit("audit_npm_package", root.ID, root.ID, true)
+	grandchild := submit("package_update_check", root.ID, completed.ID, true)
+	publicChild := submit("package_update_check", root.ID, root.ID, false)
+	for _, value := range []job.Job{completed, pending, failed, otherChild, auditChild, grandchild, publicChild} {
+		status := job.StatusCompleted
+		if value.ID == pending.ID {
+			status = job.StatusPending
+		}
+		if value.ID == failed.ID {
+			status = job.StatusFailed
+		}
+		if _, err := db.pool.Exec(ctx, `UPDATE jobs SET status=$1 WHERE id=$2`, status, value.ID); err != nil {
+			t.Fatal(err)
+		}
+		// Even a stray result on a noncompleted child must not appear in the report.
+		if _, err := db.pool.Exec(ctx, `INSERT INTO job_results (job_id,result) VALUES ($1,$2::jsonb)`, value.ID,
+			`{"jobId":"untrusted-result-id","ecosystem":"npm","name":"demo","currentVersion":"1.0.0","latestVersion":"2.0.0","staleness":"major"}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, status := range []job.Status{job.StatusWaiting, job.StatusFailed, job.StatusDeadLettered, job.StatusCancelled} {
+		if _, err := db.pool.Exec(ctx, `UPDATE jobs SET status=$1 WHERE id=$2`, status, root.ID); err != nil {
+			t.Fatal(err)
+		}
+		detail, err := s.Get(ctx, root.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(detail.UpdateResults) != 1 {
+			t.Fatalf("status=%s results=%+v", status, detail.UpdateResults)
+		}
+		want := job.UpdateResult{JobID: completed.ID, Ecosystem: "npm", Name: "demo", CurrentVersion: "1.0.0", LatestVersion: "2.0.0", Staleness: "major"}
+		if detail.UpdateResults[0] != want {
+			t.Fatalf("result=%+v", detail.UpdateResults[0])
+		}
+	}
+	for _, id := range []string{completed.ID, audit.ID} {
+		detail, err := s.Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(detail.UpdateResults) != 0 {
+			t.Fatalf("non-root %s returned update results", id)
+		}
+	}
+	if _, err := db.pool.Exec(ctx, `UPDATE job_results SET result='{"staleness":42}'::jsonb WHERE job_id=$1`, completed.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(ctx, root.ID); err == nil {
+		t.Fatal("malformed stored result silently accepted")
+	}
+}

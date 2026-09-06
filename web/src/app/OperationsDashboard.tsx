@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react"
 import { Activity, AlertTriangle, Check, Clock3, Database, Play, RefreshCw, RotateCcw, Search, Square, X } from "lucide-react"
 import { JobApi } from "../data/JobApi"
-import type { DLQEntry, JobDetail, JobPage, JobStatus } from "../types/jobs"
+import type { DLQEntry, JobDetail, JobPage, JobStatus, UpdateResult } from "../types/jobs"
 
 const statuses: JobStatus[] = ["pending", "running", "waiting", "retry_scheduled", "completed", "failed", "dead_lettered", "cancelled"]
 const terminal = new Set<JobStatus>(["completed", "failed", "dead_lettered", "cancelled"])
@@ -41,9 +41,9 @@ export function OperationsDashboard() {
 		return () => { window.clearTimeout(initial); window.clearInterval(timer) }
   }, [load])
 
-  const act = async (action: () => Promise<unknown>) => {
+  const act = async (action: () => Promise<unknown>, refresh = true) => {
     setBusy(true)
-    try { await action(); await load() } catch (cause) { setError(cause instanceof Error ? cause.message : "Action failed.") }
+    try { await action(); if (refresh) await load() } catch (cause) { setError(cause instanceof Error ? cause.message : "Action failed.") }
     finally { setBusy(false) }
   }
 
@@ -62,12 +62,18 @@ export function OperationsDashboard() {
     setSelected(await JobApi.get(response.job.id))
   })
 
-  const submitAudit = (event: FormEvent) => {
+  const submitRepository = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (busy) return
+    const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null
+    const type = submitter?.value === "dependency_update_scan" ? "dependency_update_scan" : "dependency_audit"
     void act(async () => {
-      const response = await JobApi.submit("dependency_audit", { repositoryUrl: repositoryURL, ref: "main" })
+      const payload = type === "dependency_update_scan" ? { repositoryUrl: repositoryURL } : { repositoryUrl: repositoryURL, ref: "main" }
+      const response = await JobApi.submit(type, payload)
+      setView("jobs")
       setSelected(await JobApi.get(response.job.id))
-    })
+      // Selecting the new root refreshes the list through the existing effect.
+    }, false)
   }
 
   const visibleEvents = useMemo(() => selected?.events ?? [], [selected])
@@ -95,10 +101,13 @@ export function OperationsDashboard() {
           <button onClick={() => void submitDemo({ durationMs: 0, permanentFailure: true })}><AlertTriangle size={16}/> Permanent fail</button>
           <button onClick={() => void submitDemo({ durationMs: 60000 })}><Clock3 size={16}/> Long running</button>
         </div>
-        <form className="audit-form" onSubmit={submitAudit}>
+        <form className="audit-form" onSubmit={submitRepository}>
           <label htmlFor="repository">GitHub repository</label>
           <input id="repository" type="url" value={repositoryURL} onChange={(event) => setRepositoryURL(event.target.value)} required />
-          <button type="submit"><Database size={16}/> Audit dependencies</button>
+          <div className="repository-actions">
+            <button type="submit" value="dependency_audit" disabled={busy}><Database size={16}/> Audit dependencies</button>
+            <button type="submit" value="dependency_update_scan" disabled={busy}><RefreshCw size={16}/> Check for updates</button>
+          </div>
         </form>
       </section>
 
@@ -136,10 +145,51 @@ function DetailPanel({ detail, busy, events, onCancel, onRetry }: { detail: JobD
     <div className="detail-actions">{canCancel && <button disabled={busy} onClick={onCancel}><Square size={15}/> Cancel</button>}{canRetry && <button disabled={busy} onClick={onRetry}><RotateCcw size={15}/> Retry as new job</button>}</div>
     <dl className="facts"><div><dt>Worker</dt><dd>{detail.job.lockedBy ?? "Unassigned"}</dd></div><div><dt>Lease expires</dt><dd>{when(detail.job.lockedUntil)}</dd></div><div><dt>Attempts</dt><dd>{detail.job.attempts} / {detail.job.maxAttempts}</dd></div><div><dt>Created</dt><dd>{when(detail.job.createdAt)}</dd></div></dl>
     {detail.job.lastError && <div className="error-box"><strong>{detail.job.lastErrorKind}</strong><p>{detail.job.lastError}</p></div>}
+    {detail.job.type === "dependency_update_scan" && detail.job.id === detail.job.rootJobId && <DependencyUpdates detail={detail}/> }
     <h3>Attempts</h3><div className="attempts">{detail.attempts.length === 0 ? <p>No attempt has started.</p> : detail.attempts.map((attempt) => <div key={attempt.attempt}><strong>#{attempt.attempt} · {label(attempt.status)}</strong><span>{attempt.workerId} · {when(attempt.startedAt)}</span>{attempt.error && <p>{attempt.errorKind}: {attempt.error}</p>}</div>)}</div>
     <h3>Lifecycle</h3><ol className="timeline">{events.map((event) => <li key={event.id}><span/><div><strong>{label(event.type)}</strong><small>{when(event.occurredAt)}{event.workerId ? ` · ${event.workerId}` : ""}</small></div></li>)}</ol>
     <details><summary>Payload</summary><pre>{pretty(detail.job.payload)}</pre></details>
     {detail.result !== undefined && <details open><summary>Result</summary><pre>{pretty(detail.result)}</pre></details>}
     {detail.auditResults && detail.auditResults.length > 0 && <details open><summary>Audit packages ({detail.auditResults.length})</summary><div className="audit-results">{detail.auditResults.map((row) => <div key={`${row.ecosystem}:${row.name}@${row.version}`}><strong>{row.name}</strong><span>{row.ecosystem} · {row.version}</span><span>{row.license}</span><span>{row.verdict}</span></div>)}</div></details>}
   </aside>
+}
+
+const updateBadges: Record<UpdateResult["staleness"], { order: number; text: string; status: string }> = {
+  major: { order: 0, text: "🔴 Major", status: "failed" },
+  minor: { order: 1, text: "🟡 Minor", status: "retry_scheduled" },
+  patch: { order: 2, text: "🟢 Patch", status: "completed" },
+  up_to_date: { order: 3, text: "✅ Up to date", status: "completed" },
+  unknown: { order: 4, text: "Unknown", status: "cancelled" },
+}
+
+function DependencyUpdates({ detail }: { detail: JobDetail }) {
+  const rows = [...(detail.updateResults ?? [])].sort((a, b) =>
+    updateBadges[a.staleness].order - updateBadges[b.staleness].order ||
+    a.ecosystem.localeCompare(b.ecosystem) || a.name.localeCompare(b.name) || a.jobId.localeCompare(b.jobId))
+  const counts = detail.childCounts ?? {}
+  const total = Object.values(counts).reduce((sum, count) => sum + (count ?? 0), 0)
+  const completed = counts.completed ?? 0
+  const succeeded = detail.job.status === "completed"
+  const incomplete = terminal.has(detail.job.status) && !succeeded
+  const allUpToDate = succeeded && rows.length > 0 && rows.length === total && rows.every((row) => row.staleness === "up_to_date")
+
+  return <section className="dependency-updates" aria-labelledby="dependency-updates-heading">
+    <h3 id="dependency-updates-heading">Dependency updates</h3>
+    <p>Current version is resolved from the manifest at scan time; it may differ from the installed version.</p>
+    <div role="status">
+      {incomplete && <p><strong>Incomplete</strong> · {counts.failed ?? 0} failed · {counts.dead_lettered ?? 0} dead-lettered · {counts.cancelled ?? 0} cancelled</p>}
+      {!terminal.has(detail.job.status) && total === 0 && <p>Scanning dependency manifests…</p>}
+      {total > 0 && <p>{completed} of {total} checks completed</p>}
+      {succeeded && total === 0 && rows.length === 0 && <p>No direct dependencies found.</p>}
+      {allUpToDate && <p>All checked dependencies are up to date.</p>}
+    </div>
+    {rows.length > 0 && <div className="table-wrap" tabIndex={0} role="region" aria-label="Package update results">
+      <table aria-label="Dependency updates"><thead><tr><th scope="col">Package</th><th scope="col">Ecosystem</th><th scope="col">Current version</th><th scope="col">Latest version</th><th scope="col">Update</th></tr></thead>
+        <tbody>{rows.map((row) => <tr key={row.jobId}>
+          <td>{row.name}</td><td>{row.ecosystem}</td><td>{row.currentVersion}</td><td>{row.latestVersion}</td>
+          <td><span className={`status status--${updateBadges[row.staleness].status}`}>{updateBadges[row.staleness].text}</span></td>
+        </tr>)}</tbody>
+      </table>
+    </div>}
+  </section>
 }

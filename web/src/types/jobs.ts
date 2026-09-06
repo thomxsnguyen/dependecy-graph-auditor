@@ -56,12 +56,22 @@ export interface AuditResult {
   parentVersion?: string
 }
 
+export interface UpdateResult {
+  jobId: string
+  ecosystem: "npm" | "pypi" | "go"
+  name: string
+  currentVersion: string
+  latestVersion: string
+  staleness: "major" | "minor" | "patch" | "up_to_date" | "unknown"
+}
+
 export interface JobDetail {
   job: Job
   attempts: Attempt[]
   events: JobEvent[]
   result?: unknown
   childCounts?: Partial<Record<JobStatus, number>>
+  updateResults?: UpdateResult[]
   auditResults?: AuditResult[]
   auditRelationships?: Array<{ ecosystem: string; parentName: string; parentVersion?: string; childName: string; childVersion: string }>
 }

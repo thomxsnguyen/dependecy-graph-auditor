@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 type apiStoreStub struct {
 	job.ServiceStore
 	submitted job.Submission
+	detail    job.Detail
 }
 
 func (s *apiStoreStub) Submit(_ context.Context, input job.Submission) (job.Job, bool, error) {
@@ -83,5 +85,39 @@ func TestSubmitDependencyUpdateScan(t *testing.T) {
 				t.Fatal("invalid job reached store")
 			}
 		})
+	}
+}
+
+func (s *apiStoreStub) Get(context.Context, string) (job.Detail, error) { return s.detail, nil }
+
+func TestJobDetailSerializesUpdateResults(t *testing.T) {
+	store := &apiStoreStub{detail: job.Detail{
+		Job:    job.Job{ID: "root", RootJobID: "root", Type: "dependency_update_scan", Status: job.StatusWaiting},
+		Result: json.RawMessage(`{"dependencyCount":2}`), ChildCounts: map[job.Status]int{job.StatusCompleted: 1, job.StatusPending: 1},
+		AuditResults:  []job.AuditResult{{Name: "existing-audit-field"}},
+		UpdateResults: []job.UpdateResult{{JobID: "child", Ecosystem: "npm", Name: "demo", CurrentVersion: "1.0.0", LatestVersion: "2.0.0", Staleness: "major"}},
+	}}
+	response := httptest.NewRecorder()
+	NewJobAPI(store, nil).Routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/jobs/root", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d", response.Code)
+	}
+	var body struct {
+		Job           job.Job             `json:"job"`
+		Result        json.RawMessage     `json:"result"`
+		ChildCounts   map[string]int      `json:"childCounts"`
+		AuditResults  []job.AuditResult   `json:"auditResults"`
+		UpdateResults []map[string]string `json:"updateResults"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Job.ID != "root" || len(body.Result) == 0 || body.ChildCounts["completed"] != 1 || len(body.AuditResults) != 1 || len(body.UpdateResults) != 1 {
+		t.Fatalf("response=%s", response.Body.String())
+	}
+	for key, want := range map[string]string{"jobId": "child", "ecosystem": "npm", "name": "demo", "currentVersion": "1.0.0", "latestVersion": "2.0.0", "staleness": "major"} {
+		if body.UpdateResults[0][key] != want {
+			t.Fatalf("field %s=%q want=%q", key, body.UpdateResults[0][key], want)
+		}
 	}
 }

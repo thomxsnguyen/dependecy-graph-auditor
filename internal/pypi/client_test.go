@@ -163,3 +163,37 @@ func TestPythonLicensePrecedence(t *testing.T) {
 		t.Fatalf("fallback: got %q", got)
 	}
 }
+
+func TestLatestVersion(t *testing.T) {
+	for _, tc := range []struct{ name, body, want string }{
+		{"stable and yanked", `{"releases":{"1.9":[{"yanked":false}],"1.10":[{"yanked":false}],"2.0":[{"yanked":true}],"3.0rc1":[{"yanked":false}],"4.0":[],"invalid":[{"yanked":false}]}}`, "1.10"},
+		{"prerelease only", `{"releases":{"2.0rc1":[{"yanked":false}],"2.0rc2":[{"yanked":false}]}}`, "2.0rc2"},
+		{"partly yanked", `{"releases":{"1.0":[{"yanked":true},{"yanked":false}]}}`, "1.0"},
+		{"empty", `{"releases":{}}`, ""}, {"invalid JSON", `{`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/pypi/demo-package/json" {
+					t.Errorf("path=%s", r.URL.Path)
+				}
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+			c := &Client{HTTPClient: server.Client(), BaseURL: server.URL}
+			got, err := c.LatestVersion(context.Background(), "Demo.Package")
+			if got != tc.want || (err != nil) != (tc.want == "") {
+				t.Fatalf("got %q err %v want %q", got, err, tc.want)
+			}
+		})
+	}
+	for _, status := range []int{404, 429, 503} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+			defer server.Close()
+			c := &Client{HTTPClient: server.Client(), BaseURL: server.URL}
+			if _, err := c.LatestVersion(context.Background(), "demo"); err == nil {
+				t.Fatal("expected failure")
+			}
+		})
+	}
+}

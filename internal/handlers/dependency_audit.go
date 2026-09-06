@@ -36,6 +36,44 @@ func (h DependencyAuditHandler) Handle(ctx context.Context, value job.Job) (job.
 	if err != nil {
 		return job.HandlerResult{}, job.Failure(job.ErrorPermanent, err)
 	}
+	manifests, err := loadRepositoryManifests(ctx, h.GitHub, repository, payload.Ref)
+	if err != nil {
+		return job.HandlerResult{}, err
+	}
+	children := []job.Submission{}
+	roots := []string{}
+	for _, entry := range manifests {
+		manifest := entry.manifest
+		roots = append(roots, entry.ecosystem+":"+manifest.Name)
+		for _, dependency := range manifest.Dependencies {
+			body, err := json.Marshal(auditor.AuditPayload{Name: dependency.Name, Version: dependency.VersionRange, ParentName: manifest.Name})
+			if err != nil {
+				return job.HandlerResult{}, job.Failure(job.ErrorPermanent, err)
+			}
+			children = append(children, job.Submission{Type: entry.jobType, Payload: body, MaxAttempts: value.MaxAttempts, RootJobID: value.RootJobID, ParentJobID: value.ID, Internal: true, IdempotencyKey: dependencyChildKey("audit-child:", value.RootJobID, entry.ecosystem, dependency.Name, dependency.VersionRange)})
+		}
+	}
+	result, _ := json.Marshal(map[string]any{"auditId": value.RootJobID, "repositoryUrl": payload.RepositoryURL, "roots": roots, "seedCount": len(children)})
+	return job.HandlerResult{Result: result, Children: children}, nil
+}
+
+func classifyError(err error) error {
+	var networkError net.Error
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "rate limit") || strings.Contains(message, "status 429") || strings.Contains(message, "status 502") || strings.Contains(message, "status 503") || strings.Contains(message, "status 504") || errors.As(err, &networkError) {
+		return job.Failure(job.ErrorTransient, err)
+	}
+	return job.Failure(job.ErrorPermanent, err)
+}
+
+type repositoryManifest struct {
+	ecosystem string
+	jobType   string
+	manifest  depfile.Manifest
+}
+
+// loadRepositoryManifests is shared by audit and update scans.
+func loadRepositoryManifests(ctx context.Context, fetcher ManifestFetcher, repository githubsource.Repository, ref string) ([]repositoryManifest, error) {
 	target, _ := pypi.NewTarget("3.12", "linux")
 	type manifestSpec struct {
 		path      string
@@ -58,42 +96,29 @@ func (h DependencyAuditHandler) Handle(ctx context.Context, value job.Job) (job.
 			return manifest.Manifest, err
 		}},
 	}
-	children := []job.Submission{}
-	roots := []string{}
+
+	var manifests []repositoryManifest
 	for _, spec := range specs {
-		manifestData, err := h.GitHub.FetchManifest(ctx, repository, spec.path, strings.TrimSpace(payload.Ref))
+		data, err := fetcher.FetchManifest(ctx, repository, spec.path, strings.TrimSpace(ref))
 		if err != nil {
 			if strings.Contains(err.Error(), "was not found") {
 				continue
 			}
-			return job.HandlerResult{}, classifyError(err)
+			return nil, classifyError(err)
 		}
-		manifest, err := spec.parse(manifestData)
+		manifest, err := spec.parse(data)
 		if err != nil {
-			return job.HandlerResult{}, job.Failure(job.ErrorPermanent, err)
+			return nil, job.Failure(job.ErrorPermanent, err)
 		}
-		roots = append(roots, spec.ecosystem+":"+manifest.Name)
-		for _, dependency := range manifest.Dependencies {
-			body, err := json.Marshal(auditor.AuditPayload{Name: dependency.Name, Version: dependency.VersionRange, ParentName: manifest.Name})
-			if err != nil {
-				return job.HandlerResult{}, job.Failure(job.ErrorPermanent, err)
-			}
-			sum := sha256.Sum256([]byte(value.RootJobID + "\x00" + spec.ecosystem + "\x00" + dependency.Name + "\x00" + dependency.VersionRange))
-			children = append(children, job.Submission{Type: spec.jobType, Payload: body, MaxAttempts: value.MaxAttempts, RootJobID: value.RootJobID, ParentJobID: value.ID, Internal: true, IdempotencyKey: "audit-child:" + hex.EncodeToString(sum[:])})
-		}
+		manifests = append(manifests, repositoryManifest{ecosystem: spec.ecosystem, jobType: spec.jobType, manifest: manifest})
 	}
-	if len(roots) == 0 {
-		return job.HandlerResult{}, job.Failure(job.ErrorPermanent, fmt.Errorf("repository contains no supported dependency manifest"))
+	if len(manifests) == 0 {
+		return nil, job.Failure(job.ErrorPermanent, fmt.Errorf("repository contains no supported dependency manifest"))
 	}
-	result, _ := json.Marshal(map[string]any{"auditId": value.RootJobID, "repositoryUrl": payload.RepositoryURL, "roots": roots, "seedCount": len(children)})
-	return job.HandlerResult{Result: result, Children: children}, nil
+	return manifests, nil
 }
 
-func classifyError(err error) error {
-	var networkError net.Error
-	message := strings.ToLower(err.Error())
-	if strings.Contains(message, "rate limit") || strings.Contains(message, "status 429") || strings.Contains(message, "status 502") || strings.Contains(message, "status 503") || strings.Contains(message, "status 504") || errors.As(err, &networkError) {
-		return job.Failure(job.ErrorTransient, err)
-	}
-	return job.Failure(job.ErrorPermanent, err)
+func dependencyChildKey(prefix, rootID, ecosystem, name, versionRange string) string {
+	sum := sha256.Sum256([]byte(rootID + "\x00" + ecosystem + "\x00" + name + "\x00" + versionRange))
+	return prefix + hex.EncodeToString(sum[:])
 }

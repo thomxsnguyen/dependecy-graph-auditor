@@ -184,5 +184,5 @@ npm test
 npm run build
 ```
 
-See [architecture](docs/architecture.md), [reliability guarantees](docs/reliability.md),
-[test strategy](docs/testing.md), and the [demo runbook](docs/demo.md).
+See [architecture](docs/mvp/architecture.md), [reliability guarantees](docs/mvp/reliability.md),
+[test strategy](docs/mvp/testing.md), and the [demo runbook](docs/mvp/demo.md).

@@ -31,7 +31,7 @@ require (
 	want := []depfile.Dependency{
 		{Name: "github.com/zeta/module", VersionRange: "v1.9.0"},
 		{Name: "github.com/zeta/module", VersionRange: "v1.10.0"},
-		{Name: "golang.org/x/sync", VersionRange: "v0.16.0"},
+		{Name: "golang.org/x/sync", VersionRange: "v0.16.0", Indirect: true},
 	}
 	if len(manifest.Dependencies) != len(want) {
 		t.Fatalf("dependencies: got %+v, want %+v", manifest.Dependencies, want)

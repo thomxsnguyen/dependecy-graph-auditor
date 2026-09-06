@@ -346,3 +346,7 @@ func TestHandleBadPayloadReturnsError(t *testing.T) {
 		t.Fatal("Handle: expected unmarshal error, got nil")
 	}
 }
+
+func (*mockRegistry) LatestVersion(context.Context, string) (string, error) {
+	return "", errors.New("latest lookup not configured in audit test")
+}

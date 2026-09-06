@@ -446,7 +446,7 @@ func (s *Store) Complete(ctx context.Context, value job.Job, result job.HandlerR
 			return err
 		}
 	}
-	if len(result.Result) > 0 && string(result.Result) != "null" && status == job.StatusCompleted {
+	if len(result.Result) > 0 && string(result.Result) != "null" && (status == job.StatusCompleted || value.Type == "dependency_update_scan") {
 		if _, err := tx.Exec(ctx, `INSERT INTO job_results (job_id,result) VALUES ($1,$2::jsonb)
 			ON CONFLICT (job_id) DO NOTHING`, value.ID, string(result.Result)); err != nil {
 			return err
@@ -511,6 +511,18 @@ func insertAuditRelationship(ctx context.Context, tx pgx.Tx, child job.Submissio
 }
 
 func finalizeRoot(ctx context.Context, tx pgx.Tx, rootID string) error {
+	var rootType string
+	if err := tx.QueryRow(ctx, `SELECT type FROM jobs WHERE id=$1`, rootID).Scan(&rootType); err != nil {
+		return err
+	}
+	if rootType == "dependency_update_scan" {
+		// Serialize update finalizers so simultaneous child completions cannot
+		// each see another uncommitted child and leave the root waiting forever.
+		var lockedID string
+		if err := tx.QueryRow(ctx, `SELECT id FROM jobs WHERE id=$1 FOR UPDATE`, rootID).Scan(&lockedID); err != nil {
+			return err
+		}
+	}
 	var active int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE root_job_id=$1 AND id<>$1
 		AND status IN ('pending','running','retry_scheduled','waiting')`, rootID).Scan(&active); err != nil {
@@ -532,25 +544,32 @@ func finalizeRoot(ctx context.Context, tx pgx.Tx, rootID string) error {
 	} else if failed > 0 {
 		status = job.StatusFailed
 	}
-	var packages, violations int
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*),COUNT(*) FILTER (WHERE verdict='policy_violation')
-		FROM audit_results WHERE root_job_id=$1`, rootID).Scan(&packages, &violations); err != nil {
-		return err
+	result := ""
+	failureMessage := "one or more audit tasks failed"
+	exhaustedMessage := "one or more audit tasks exhausted retries"
+	if rootType == "dependency_update_scan" {
+		failureMessage = "one or more update checks failed"
+		exhaustedMessage = "one or more update checks exhausted retries"
+	} else {
+		var packages, violations int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*),COUNT(*) FILTER (WHERE verdict='policy_violation')
+			FROM audit_results WHERE root_job_id=$1`, rootID).Scan(&packages, &violations); err != nil {
+			return err
+		}
+		result = fmt.Sprintf(`{"auditId":%q,"packages":%d,"violations":%d,"failedChildren":%d}`, rootID, packages, violations, failed)
 	}
-	result := fmt.Sprintf(`{"auditId":%q,"packages":%d,"violations":%d,"failedChildren":%d}`,
-		rootID, packages, violations, failed)
 	tag, err := tx.Exec(ctx, `UPDATE jobs SET status=$1, completed_at=NOW(),
-		last_error=CASE WHEN $1<>$2 THEN 'one or more audit tasks failed' ELSE NULL END,
+		last_error=CASE WHEN $1<>$2 THEN $7 ELSE NULL END,
 		last_error_kind=CASE WHEN $1=$3 THEN 'transient' WHEN $1=$4 THEN 'permanent' ELSE NULL END
 		WHERE id=$5 AND status=$6`, status, job.StatusCompleted, job.StatusDeadLettered,
-		job.StatusFailed, rootID, job.StatusWaiting)
+		job.StatusFailed, rootID, job.StatusWaiting, failureMessage)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
 		return nil
 	}
-	if status == job.StatusCompleted {
+	if status == job.StatusCompleted && rootType != "dependency_update_scan" {
 		_, err := tx.Exec(ctx, `INSERT INTO job_results (job_id,result) VALUES ($1,$2::jsonb)
 			ON CONFLICT (job_id) DO NOTHING`, rootID, result)
 		if err != nil {
@@ -560,8 +579,8 @@ func finalizeRoot(ctx context.Context, tx pgx.Tx, rootID string) error {
 	if status == job.StatusDeadLettered {
 		_, err := tx.Exec(ctx, `INSERT INTO dlq
 			(job_id,job_type,payload,attempts,error,error_kind,root_job_id)
-			SELECT id,type,payload,attempts,'one or more audit tasks exhausted retries','transient',root_job_id
-			FROM jobs WHERE id=$1`, rootID)
+			SELECT id,type,payload,attempts,$2,'transient',root_job_id
+			FROM jobs WHERE id=$1`, rootID, exhaustedMessage)
 		if err != nil {
 			return err
 		}

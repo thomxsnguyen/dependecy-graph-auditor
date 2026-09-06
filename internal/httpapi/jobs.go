@@ -87,19 +87,22 @@ func validateSubmission(input submitRequest) error {
 		if payload.DurationMS < 0 || payload.DurationMS > 120000 || payload.TransientFailures < 0 || payload.TransientFailures > 20 {
 			return errors.New("demo controls are outside allowed bounds")
 		}
-	case "dependency_audit":
+	case "dependency_audit", "dependency_update_scan":
 		var payload struct {
 			RepositoryURL string `json:"repositoryUrl"`
 			Ref           string `json:"ref"`
 		}
 		if len(input.Payload) == 0 || json.Unmarshal(input.Payload, &payload) != nil {
+			if input.Type == "dependency_update_scan" {
+				return errors.New("payload must be a valid dependency update scan object")
+			}
 			return errors.New("payload must be a valid dependency audit object")
 		}
 		if _, err := githubsource.ParseRepositoryURL(strings.TrimSpace(payload.RepositoryURL)); err != nil {
 			return errors.New("repositoryUrl must be https://github.com/owner/repository")
 		}
 	default:
-		return errors.New("type must be demo or dependency_audit")
+		return errors.New("type must be demo, dependency_audit or dependency_update_scan")
 	}
 	return nil
 }

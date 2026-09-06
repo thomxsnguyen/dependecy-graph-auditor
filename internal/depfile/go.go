@@ -66,7 +66,7 @@ func ParseGoMod(reader io.Reader) (GoManifest, error) {
 				return GoManifest{}, fmt.Errorf("depfile: go.mod requirement %s@%s: invalid pseudo-version: %w", path, version, err)
 			}
 		}
-		dependencies = append(dependencies, Dependency{Name: path, VersionRange: version})
+		dependencies = append(dependencies, Dependency{Name: path, VersionRange: version, Indirect: requirement.Indirect})
 	}
 	sort.SliceStable(dependencies, func(i, j int) bool {
 		if dependencies[i].Name != dependencies[j].Name {

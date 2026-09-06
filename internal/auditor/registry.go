@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	ms "github.com/Masterminds/semver/v3"
+
 	"github.com/thomxsnguyen/mini-distributed-job-api/internal/semver"
 )
 
@@ -28,6 +30,8 @@ type PackageMetadata struct {
 type RegistryClient interface {
 	// FetchPackage returns the resolved metadata for name at the given version range.
 	FetchPackage(ctx context.Context, name, version string) (*PackageMetadata, error)
+	// LatestVersion prefers the highest stable release, falling back to prereleases.
+	LatestVersion(ctx context.Context, name string) (string, error)
 }
 
 // npmVersionMeta is the subset of an npm package version object we need.
@@ -180,4 +184,30 @@ func (c *NpmClient) fetchVersionMeta(ctx context.Context, name, version string) 
 		return nil, fmt.Errorf("npm: decode metadata for %s@%s: %w", name, version, err)
 	}
 	return &meta, nil
+}
+
+// LatestVersion reuses the compact manifest endpoint. Each call fetches a fresh list.
+func (c *NpmClient) LatestVersion(ctx context.Context, name string) (string, error) {
+	versions, err := c.fetchAllVersions(ctx, name)
+	if err != nil {
+		return "", fmt.Errorf("npm: latest version for %s: %w", name, err)
+	}
+	constraint, err := semver.ParseRange(">=0.0.0")
+	if err != nil {
+		return "", err
+	}
+	if latest, err := semver.Resolve(constraint, versions); err == nil {
+		return latest, nil
+	}
+	var latest *ms.Version
+	for _, raw := range versions {
+		candidate, err := ms.NewVersion(raw)
+		if err == nil && (latest == nil || candidate.GreaterThan(latest)) {
+			latest = candidate
+		}
+	}
+	if latest == nil {
+		return "", fmt.Errorf("npm: latest version for %s: no usable releases", name)
+	}
+	return latest.Original(), nil
 }

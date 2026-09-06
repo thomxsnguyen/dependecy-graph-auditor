@@ -159,3 +159,65 @@ func TestClientRejectsInvalidCoordinatesBeforeRequest(t *testing.T) {
 		t.Fatalf("requests: got %d, want 0", requests.Load())
 	}
 }
+
+func TestLatestVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/example.com/!acme/!widget/@latest" || r.Header.Get("Accept") != "application/json" {
+			t.Errorf("request=%s headers=%v", r.URL.Path, r.Header)
+		}
+		_, _ = w.Write([]byte(`{"Version":"v1.2.3"}`))
+	}))
+	defer server.Close()
+	c := &Client{HTTPClient: server.Client(), BaseURL: server.URL}
+	got, err := c.LatestVersion(context.Background(), "example.com/Acme/Widget")
+	if err != nil || got != "v1.2.3" {
+		t.Fatalf("got %q err %v", got, err)
+	}
+}
+
+func TestLatestVersionFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		kind       ErrorKind
+		retry      bool
+	}{
+		{"missing", `{}`, 200, ErrorDecode, false}, {"invalid version", `{"Version":"latest"}`, 200, ErrorDecode, false},
+		{"major mismatch", `{"Version":"v2.0.0"}`, 200, ErrorDecode, false}, {"invalid JSON", `{`, 200, ErrorDecode, false},
+		{"oversized", strings.Repeat("x", int(defaultMaxBodyBytes+1)), 200, ErrorResponseTooLarge, false},
+		{"not found", "", 404, ErrorNotFound, false}, {"gone", "", 410, ErrorNotFound, false},
+		{"rate limit", "", 429, ErrorRateLimited, true}, {"server error", "", 503, ErrorHTTPStatus, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			c := &Client{HTTPClient: server.Client(), BaseURL: server.URL}
+			_, err := c.LatestVersion(context.Background(), "example.com/module")
+			var pe *ProxyError
+			if !errors.As(err, &pe) || pe.Kind != tc.kind || pe.Retryable() != tc.retry {
+				t.Fatalf("error=%v want %s retry=%v", err, tc.kind, tc.retry)
+			}
+		})
+	}
+	t.Run("timeout", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+		defer server.Close()
+		c := &Client{HTTPClient: server.Client(), BaseURL: server.URL}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		_, err := c.LatestVersion(ctx, "example.com/module")
+		var pe *ProxyError
+		if !errors.As(err, &pe) || pe.Kind != ErrorTimeout {
+			t.Fatalf("error=%v", err)
+		}
+	})
+	t.Run("invalid base URL", func(t *testing.T) {
+		c := &Client{BaseURL: "file:///tmp/proxy"}
+		if _, err := c.LatestVersion(context.Background(), "example.com/module"); err == nil {
+			t.Fatal("expected rejection")
+		}
+	})
+}

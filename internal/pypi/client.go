@@ -263,3 +263,17 @@ func stringSliceContains(values []string, target string) bool {
 	}
 	return false
 }
+
+// LatestVersion returns the highest non-yanked stable release, or a prerelease
+// if no stable release exists, using the existing PEP 440 resolver.
+func (c *Client) LatestVersion(ctx context.Context, name string) (string, error) {
+	versions, err := c.fetchAvailableVersions(ctx, NormalizeName(name))
+	if err != nil {
+		return "", fmt.Errorf("pypi: latest version for %s: %w", name, err)
+	}
+	latest, err := ResolveVersion("", versions)
+	if err != nil {
+		return "", fmt.Errorf("pypi: latest version for %s: %w", name, err)
+	}
+	return latest, nil
+}

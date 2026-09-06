@@ -549,3 +549,7 @@ func TestServiceReclaimsOnlyExpiredLease(t *testing.T) {
 		t.Fatalf("statuses=%v", statuses)
 	}
 }
+
+func (smokeRegistry) LatestVersion(context.Context, string) (string, error) {
+	return "", errors.New("latest lookup not configured in audit test")
+}

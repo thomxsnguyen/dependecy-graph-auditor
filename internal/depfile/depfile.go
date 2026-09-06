@@ -15,6 +15,7 @@ import (
 type Dependency struct {
 	Name         string
 	VersionRange string // raw range from the file, e.g., "^4.18.0"
+	Indirect     bool   // Go requirements marked // indirect; retained for audit seeds
 }
 
 // Manifest is the package metadata needed to seed an audit.

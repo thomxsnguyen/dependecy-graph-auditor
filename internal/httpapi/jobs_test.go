@@ -56,3 +56,32 @@ func TestMetricsUsesBoundedLabels(t *testing.T) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestSubmitDependencyUpdateScan(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+	}{
+		{"valid", `{"type":"dependency_update_scan","payload":{"repositoryUrl":"https://github.com/acme/service","ref":"main"}}`, http.StatusAccepted},
+		{"bad repository", `{"type":"dependency_update_scan","payload":{"repositoryUrl":"https://example.com/acme/service"}}`, http.StatusBadRequest},
+		{"missing payload", `{"type":"dependency_update_scan"}`, http.StatusBadRequest},
+		{"internal child", `{"type":"package_update_check","payload":{"ecosystem":"npm","name":"demo","versionRange":"1.0.0"}}`, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &apiStoreStub{}
+			request := httptest.NewRequest(http.MethodPost, "/api/jobs", strings.NewReader(tc.body))
+			request.Header.Set("Idempotency-Key", "update-test")
+			recorder := httptest.NewRecorder()
+			NewJobAPI(store, nil).Routes().ServeHTTP(recorder, request)
+			if recorder.Code != tc.status {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if tc.status == http.StatusAccepted && (store.submitted.Type != "dependency_update_scan" || store.submitted.Internal || store.submitted.IdempotencyKey != "update-test") {
+				t.Fatalf("submission=%+v", store.submitted)
+			}
+			if tc.status != http.StatusAccepted && store.submitted.Type != "" {
+				t.Fatal("invalid job reached store")
+			}
+		})
+	}
+}

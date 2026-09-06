@@ -45,7 +45,11 @@ func main() {
 	store := storepg.New(pool)
 	githubClient := &githubsource.GitHubClient{Token: os.Getenv("GITHUB_TOKEN")}
 	handlers := map[string]job.ServiceHandler{
-		"demo":               worker.DemoHandler{},
+		"demo":                   worker.DemoHandler{},
+		"dependency_update_scan": handlers.DependencyUpdateScanHandler{GitHub: githubClient},
+		"package_update_check": handlers.PackageUpdateCheckHandler{Registries: handlers.UpdateCheckRegistries{
+			NPM: auditor.NewNpmClient(), PyPI: pypi.NewClient(mustPythonTarget()), Go: gomod.NewClient(),
+		}},
 		"dependency_audit":   handlers.DependencyAuditHandler{GitHub: githubClient},
 		"audit_npm_package":  auditor.AuditPackageServiceHandler{Registry: auditor.NewNpmClient(), Policy: auditor.LicensePolicy{}, JobType: "audit_npm_package", Ecosystem: "npm"},
 		"audit_pypi_package": auditor.AuditPackageServiceHandler{Registry: pypi.NewClient(mustPythonTarget()), Policy: auditor.LicensePolicy{}, JobType: "audit_pypi_package", Ecosystem: "pypi"},

@@ -1,5 +1,7 @@
 # Distributed Job Queue Service
 
+(MVP COMPLETED)
+
 A deployable PostgreSQL-backed job queue with a Go API, independently scalable
 workers, an operations dashboard, dependency auditing, and package-graph
 analysis as reference workloads.
